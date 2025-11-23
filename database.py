@@ -20,6 +20,14 @@ else:
     # Correção para o Render (postgres:// -> postgresql://)
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# ... (código anterior)
+
+# Correção para o Render
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# ---> PRINT DE DEBUG AQUI <---
+print(f"DEBUG: Tentando conectar em: {DATABASE_URL[:15]}... (Escondido)")
 
 # Cria a engine
 engine = create_engine(DATABASE_URL)
