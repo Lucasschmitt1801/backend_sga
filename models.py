@@ -1,0 +1,56 @@
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Float, DateTime
+from sqlalchemy.orm import relationship
+from database import Base
+import datetime
+
+class Usuario(Base):
+    __tablename__ = "usuarios"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    senha_hash = Column(String, nullable=False)
+    perfil = Column(String, default="EXECUTOR") 
+    ativo = Column(Boolean, default=True)
+    id_setor = Column(Integer, nullable=True)
+
+class Veiculo(Base):
+    __tablename__ = "veiculos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    placa = Column(String, unique=True, index=True, nullable=False)
+    chassi = Column(String, unique=True, nullable=True)
+    modelo = Column(String, nullable=False)
+    ano_fabricacao = Column(Integer, nullable=True)
+    cor = Column(String, nullable=True)
+    status = Column(String, default="PATIO")
+    id_setor = Column(Integer, nullable=True)
+
+class Abastecimento(Base):
+    __tablename__ = "abastecimentos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    id_usuario = Column(Integer, ForeignKey("usuarios.id"))
+    id_veiculo = Column(Integer, ForeignKey("veiculos.id"))
+    
+    data_hora = Column(DateTime, default=datetime.datetime.utcnow)
+    valor_total = Column(Float, nullable=False)
+    litros = Column(Float, nullable=True)
+    nome_posto = Column(String, nullable=True)
+    
+    status = Column(String, default="PENDENTE_VALIDACAO") 
+    justificativa_revisao = Column(String, nullable=True) # <--- CAMPO NOVO
+    
+    usuario = relationship("Usuario")
+    veiculo = relationship("Veiculo")
+    fotos = relationship("FotoAbastecimento", back_populates="abastecimento")
+
+class FotoAbastecimento(Base):
+    __tablename__ = "fotos_abastecimento"
+
+    id = Column(Integer, primary_key=True, index=True)
+    id_abastecimento = Column(Integer, ForeignKey("abastecimentos.id"))
+    tipo = Column(String) 
+    url_arquivo = Column(String) 
+    
+    abastecimento = relationship("Abastecimento", back_populates="fotos")
