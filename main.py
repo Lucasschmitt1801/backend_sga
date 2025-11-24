@@ -1,3 +1,4 @@
+import ocr_service
 from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,15 +60,74 @@ def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db))
 def listar_veiculos(db: Session = Depends(get_db)):
     return db.query(models.Veiculo).all()
 
-@app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
-def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
-    if not db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first():
-        raise HTTPException(status_code=404, detail="Veículo não encontrado")
-    novo_abastecimento = models.Abastecimento(id_usuario=usuario_atual.id, **dados.dict(), status="PENDENTE_VALIDACAO")
-    db.add(novo_abastecimento)
+@app.post("/abastecimentos/{id_abastecimento}/fotos/")
+def upload_foto(
+    id_abastecimento: int,
+    tipo_foto: str = Form(...),
+    arquivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
+    if not abastecimento:
+        raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
+
+    extensao = arquivo.filename.split(".")[-1]
+    nome_arquivo = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
+    caminho_completo = f"uploads/{nome_arquivo}"
+
+    # 1. Salva o arquivo
+    with open(caminho_completo, "wb") as buffer:
+        shutil.copyfileobj(arquivo.file, buffer)
+
+    # 2. CHAMA A INTELIGÊNCIA ARTIFICIAL 🤖
+    texto_detectado = ""
+    if tipo_foto == "PLACA": # Só gastamos créditos da IA se for foto da PLACA
+        print(f"🔍 Analisando foto da placa: {nome_arquivo}...")
+        texto_lido = ocr_service.ler_texto_imagem(caminho_completo)
+        
+        if texto_lido:
+            print(f"🤖 A IA leu: {texto_lido}")
+            # Vamos tentar achar a placa do carro no texto lido
+            # Busca o veículo desse abastecimento
+            veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
+            placa_esperada = veiculo.placa.upper().replace("-", "") # Tira o hífen (ABC1234)
+            
+            # Limpa o texto da IA (tira espaços e hifens para comparar)
+            texto_limpo = texto_lido.replace("-", "").replace(" ", "")
+            
+            if placa_esperada in texto_limpo:
+                texto_detectado = "VALIDADO_IA_OK"
+                print("✅ Placa confirmada pela IA!")
+            else:
+                texto_detectado = f"ALERTA_IA: Leu '{texto_lido[:20]}...'"
+                print("❌ Placa divergente!")
+        else:
+            texto_detectado = "ERRO_LEITURA_IA"
+
+    # 3. Salva no banco (Podemos salvar o resultado da IA num campo novo ou no log)
+    # Por enquanto, vamos salvar no campo 'tipo' só pra testar, ou criar um campo novo depois.
+    # Vou adicionar um print no retorno para você ver no App.
+    
+    nova_foto = models.FotoAbastecimento(
+        id_abastecimento=id_abastecimento, 
+        tipo=tipo_foto, 
+        url_arquivo=nome_arquivo
+    )
+    db.add(nova_foto)
+    
+    # Se a IA detectou erro, podemos marcar o abastecimento como "EM ANÁLISE" ou deixar um aviso
+    if "ALERTA_IA" in texto_detectado:
+        abastecimento.justificativa_revisao = f"[IA] Possível fraude. Placa não encontrada na foto."
+        db.add(abastecimento)
+
     db.commit()
-    db.refresh(novo_abastecimento)
-    return novo_abastecimento
+    
+    return {
+        "mensagem": "Sucesso", 
+        "url": f"/fotos/{nome_arquivo}",
+        "analise_ia": texto_detectado
+    }
 
 @app.get("/abastecimentos/", response_model=list[schemas.AbastecimentoResponse])
 def listar_abastecimentos(db: Session = Depends(get_db)): # Removi verificação de token pra facilitar teste
