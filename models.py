@@ -41,6 +41,9 @@ class Abastecimento(Base):
     status = Column(String, default="PENDENTE_VALIDACAO") 
     justificativa_revisao = Column(String, nullable=True) # <--- CAMPO NOVO
     
+    gps_lat = Column(Float, nullable=True)
+    gps_long = Column(Float, nullable=True)
+    
     usuario = relationship("Usuario")
     veiculo = relationship("Veiculo")
     fotos = relationship("FotoAbastecimento", back_populates="abastecimento")

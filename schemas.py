@@ -39,6 +39,8 @@ class AbastecimentoCreate(BaseModel):
     valor_total: float
     litros: float | None = None
     nome_posto: str | None = None
+    gps_lat: float | None = None
+    gps_long: float | None = None
 
 # O que o Admin envia para Aprovar/Reprovar
 class AbastecimentoReview(BaseModel):

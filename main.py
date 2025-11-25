@@ -68,21 +68,26 @@ def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db))
 def listar_veiculos(db: Session = Depends(get_db)):
     return db.query(models.Veiculo).all()
 
-# --- A ROTA QUE ESTAVA FALTANDO (Corrigindo o Erro 405) ---
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
 def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     if not db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first():
         raise HTTPException(status_code=404, detail="Veículo não encontrado")
     
-    novo = models.Abastecimento(
+    novo_abastecimento = models.Abastecimento(
         id_usuario=usuario_atual.id,
-        **dados.dict(),
-        status="PENDENTE_VALIDACAO"
+        id_veiculo=dados.id_veiculo,
+        valor_total=dados.valor_total,
+        litros=dados.litros,
+        nome_posto=dados.nome_posto,
+        status="PENDENTE_VALIDACAO",
+        # --- SALVAR GPS ---
+        gps_lat=dados.gps_lat,
+        gps_long=dados.gps_long
     )
-    db.add(novo)
+    db.add(novo_abastecimento)
     db.commit()
-    db.refresh(novo)
-    return novo
+    db.refresh(novo_abastecimento)
+    return novo_abastecimento
 
 @app.get("/abastecimentos/", response_model=list[schemas.AbastecimentoResponse])
 def listar_abastecimentos(db: Session = Depends(get_db)):
