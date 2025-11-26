@@ -7,6 +7,7 @@ from jose import jwt, JWTError
 from database import get_db, engine
 import models, schemas, auth
 import shutil
+import re
 import os
 import uuid
 import ocr_service 
@@ -69,26 +70,66 @@ def listar_veiculos(db: Session = Depends(get_db)):
     return db.query(models.Veiculo).all()
 
 # IDENTIFICAR VEÍCULO (IA)
+# Função auxiliar para padronizar o texto (Remove traços e espaços)
+def limpar_placa(texto):
+    return texto.replace("-", "").replace(" ", "").upper()
+
 @app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
-def identificar_veiculo(arquivo: UploadFile = File(...), db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+def identificar_veiculo(
+    arquivo: UploadFile = File(...), 
+    db: Session = Depends(get_db), 
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    # 1. Salvar arquivo temporariamente
     extensao = arquivo.filename.split(".")[-1]
     nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
     caminho_completo = f"uploads/{nome_arquivo}"
-    with open(caminho_completo, "wb") as buffer: shutil.copyfileobj(arquivo.file, buffer)
+    
+    with open(caminho_completo, "wb") as buffer:
+        shutil.copyfileobj(arquivo.file, buffer)
 
     print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
-    texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
-    os.remove(caminho_completo) # Limpa temp
-
-    if not texto_ia: raise HTTPException(status_code=404, detail="Não foi possível ler a placa.")
-
-    texto_limpo = texto_ia.replace("-", "").replace(" ", "").upper()
-    todos_veiculos = db.query(models.Veiculo).all()
-    for veiculo in todos_veiculos:
-        placa_limpa = veiculo.placa.replace("-", "").replace(" ", "").upper()
-        if placa_limpa in texto_limpo: return veiculo
     
-    raise HTTPException(status_code=404, detail="Nenhum veículo cadastrado encontrado.")
+    # 2. Ler OCR
+    texto_ocr = ocr_service.ler_texto_imagem(caminho_completo)
+    
+    # Limpa temp
+    if os.path.exists(caminho_completo):
+        os.remove(caminho_completo) 
+
+    if not texto_ocr:
+        raise HTTPException(status_code=404, detail="Não foi possível ler nenhum texto na imagem.")
+
+    # 3. Lógica Inteligente (Regex)
+    # Procura padrões: 3 Letras + 1 Num + 1 Letra/Num + 2 Num
+    # Cobre: AAA-1234 (Antiga) e AAA1B23 (Mercosul)
+    padrao_placa = re.compile(r'[A-Z]{3}[0-9][0-9A-Z][0-9]{2}')
+    
+    texto_limpo = limpar_placa(texto_ocr)
+    match = padrao_placa.search(texto_limpo)
+    
+    # Se achou um padrão de placa, usa ele. Se não, usa o texto bruto limpo.
+    candidata = match.group(0) if match else texto_limpo
+    print(f"🎯 OCR Bruto: {texto_ocr} | Candidata filtrada: {candidata}")
+
+    # 4. Busca no Banco de Dados
+    
+    # Tenta busca EXATA primeiro (Muito mais rápido e preciso)
+    veiculo = db.query(models.Veiculo).filter(models.Veiculo.placa == candidata).first()
+    if veiculo:
+        return veiculo
+        
+    # Se não achar exato, tenta a busca "CONTÉM" (Fallback para leituras parciais)
+    # Ex: OCR leu "BRABC1234" (pegou o BR da placa), mas no banco é "ABC1234"
+    todos_veiculos = db.query(models.Veiculo).all()
+    for v in todos_veiculos:
+        placa_v = limpar_placa(v.placa)
+        # Verifica se a placa do banco está contida no texto lido
+        if placa_v in texto_limpo: 
+            return v
+    
+    raise HTTPException(status_code=404, detail=f"Veículo não identificado. Texto lido: {texto_limpo}")
+
 
 # REGISTRAR ABASTECIMENTO
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
