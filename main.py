@@ -9,15 +9,15 @@ import models, schemas, auth
 import shutil
 import os
 import uuid
-import ocr_service # Importa o módulo da IA
+import ocr_service 
 
 # Cria tabelas
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="SGA - Sistema de Gestão de Abastecimento")
 
-# Configuração CORS (Para o Site e App funcionarem)
-origins = ["*"] # Permite todos para facilitar o teste com App
+# Configuração CORS 
+origins = ["*"] 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -68,94 +68,55 @@ def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db))
 def listar_veiculos(db: Session = Depends(get_db)):
     return db.query(models.Veiculo).all()
 
+# IDENTIFICAR VEÍCULO (IA)
+@app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
+def identificar_veiculo(arquivo: UploadFile = File(...), db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    extensao = arquivo.filename.split(".")[-1]
+    nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
+    caminho_completo = f"uploads/{nome_arquivo}"
+    with open(caminho_completo, "wb") as buffer: shutil.copyfileobj(arquivo.file, buffer)
+
+    print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
+    texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
+    os.remove(caminho_completo) # Limpa temp
+
+    if not texto_ia: raise HTTPException(status_code=404, detail="Não foi possível ler a placa.")
+
+    texto_limpo = texto_ia.replace("-", "").replace(" ", "").upper()
+    todos_veiculos = db.query(models.Veiculo).all()
+    for veiculo in todos_veiculos:
+        placa_limpa = veiculo.placa.replace("-", "").replace(" ", "").upper()
+        if placa_limpa in texto_limpo: return veiculo
+    
+    raise HTTPException(status_code=404, detail="Nenhum veículo cadastrado encontrado.")
+
+# REGISTRAR ABASTECIMENTO
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
 def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     if not db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first():
         raise HTTPException(status_code=404, detail="Veículo não encontrado")
     
-    novo_abastecimento = models.Abastecimento(
-        id_usuario=usuario_atual.id,
-        id_veiculo=dados.id_veiculo,
-        valor_total=dados.valor_total,
-        litros=dados.litros,
-        nome_posto=dados.nome_posto,
-        status="PENDENTE_VALIDACAO",
-        # --- SALVAR GPS ---
-        gps_lat=dados.gps_lat,
-        gps_long=dados.gps_long
-    )
-    db.add(novo_abastecimento)
+    novo = models.Abastecimento(id_usuario=usuario_atual.id, **dados.dict(), status="PENDENTE_VALIDACAO")
+    db.add(novo)
     db.commit()
-    db.refresh(novo_abastecimento)
-    return novo_abastecimento
+    db.refresh(novo)
+    return novo
 
 @app.get("/abastecimentos/", response_model=list[schemas.AbastecimentoResponse])
 def listar_abastecimentos(db: Session = Depends(get_db)):
-    # Traz os dados e ordena por data (mais recente primeiro)
     return db.query(models.Abastecimento).order_by(models.Abastecimento.data_hora.desc()).all()
 
 @app.patch("/abastecimentos/{id_abastecimento}/revisar", response_model=schemas.AbastecimentoResponse)
 def revisar_abastecimento(id_abastecimento: int, review: schemas.AbastecimentoReview, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
     if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
-    
     abastecimento.status = review.status
-    if review.justificativa:
-        abastecimento.justificativa_revisao = review.justificativa
-    
+    if review.justificativa: abastecimento.justificativa_revisao = review.justificativa
     db.commit()
     db.refresh(abastecimento)
     return abastecimento
-# ... (imports anteriores)
 
-# --- ROTA NOVA: IDENTIFICAR VEÍCULO POR FOTO (IA) ---
-@app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
-def identificar_veiculo(
-    arquivo: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    usuario_atual: models.Usuario = Depends(get_usuario_atual)
-):
-    # 1. Salva a foto temporariamente
-    extensao = arquivo.filename.split(".")[-1]
-    nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
-    caminho_completo = f"uploads/{nome_arquivo}"
-
-    with open(caminho_completo, "wb") as buffer:
-        shutil.copyfileobj(arquivo.file, buffer)
-
-    # 2. Chama a IA para ler o texto
-    print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
-    texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
-    
-    # Remove o arquivo temporário para não encher o servidor
-    os.remove(caminho_completo)
-
-    if not texto_ia:
-        raise HTTPException(status_code=404, detail="Não foi possível ler a placa na imagem.")
-
-    print(f"🤖 Texto encontrado: {texto_ia}")
-
-    # 3. Procura no Banco de Dados
-    # Vamos limpar o texto da IA (remover espaços/hifens) para comparar
-    texto_limpo = texto_ia.replace("-", "").replace(" ", "").upper()
-
-    # Pega todos os veículos ativos
-    todos_veiculos = db.query(models.Veiculo).all()
-
-    veiculo_encontrado = None
-    for veiculo in todos_veiculos:
-        placa_limpa = veiculo.placa.replace("-", "").replace(" ", "").upper()
-        
-        # Se a placa do carro estiver DENTRO do texto que a IA leu
-        if placa_limpa in texto_limpo:
-            veiculo_encontrado = veiculo
-            break
-    
-    if veiculo_encontrado:
-        return veiculo_encontrado
-    else:
-        raise HTTPException(status_code=404, detail="Nenhum veículo cadastrado foi encontrado nesta foto.")
-# --- ROTA DE UPLOAD COM INTELIGÊNCIA ARTIFICIAL ---
+# --- ROTA DE UPLOAD COM LÓGICA ANTIFRAUDE HISTÓRICA ---
 @app.post("/abastecimentos/{id_abastecimento}/fotos/")
 def upload_foto(
     id_abastecimento: int,
@@ -167,7 +128,6 @@ def upload_foto(
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
     if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
 
-    # 1. Salva o arquivo
     extensao = arquivo.filename.split(".")[-1]
     nome_arquivo = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
     caminho_completo = f"uploads/{nome_arquivo}"
@@ -175,31 +135,48 @@ def upload_foto(
     with open(caminho_completo, "wb") as buffer:
         shutil.copyfileobj(arquivo.file, buffer)
 
-    # 2. CHAMA A IA SE FOR FOTO DA PLACA 🤖
+    # LÓGICA DE IA
+    alerta_ia = ""
+    
     if tipo_foto == "PLACA":
-        print(f"🔍 IA Analisando: {nome_arquivo}")
         texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
-        
         if texto_ia:
-            print(f"🤖 IA Leu: {texto_ia}")
-            
-            # Busca a placa original do carro
             veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
             placa_real = veiculo.placa.upper().replace("-", "").replace(" ", "")
-            
-            # Compara
-            if placa_real in texto_ia:
-                print("✅ Placa Validada!")
-                # Poderíamos auto-aprovar aqui, mas vamos só logar por enquanto
-            else:
-                print("❌ Placa Divergente!")
-                abastecimento.justificativa_revisao = f"[ALERTA IA] Placa lida '{texto_ia}' difere de '{placa_real}'"
-                db.add(abastecimento)
-                db.commit()
+            if placa_real not in texto_ia:
+                alerta_ia = f"[ALERTA IA] Placa lida '{texto_ia[:15]}...' difere de '{placa_real}'"
 
-    # 3. Registra a foto no banco
+    elif tipo_foto == "PAINEL":
+        km_lido = ocr_service.ler_km_imagem(caminho_completo)
+        if km_lido:
+            # 1. Comparar com o Input do Usuário
+            km_input = abastecimento.quilometragem
+            if km_input and km_lido < km_input:
+                 alerta_ia = f"[ALERTA IA] KM Foto ({km_lido}) < KM Digitado ({km_input})"
+            
+            # 2. Comparar com HISTÓRICO (Antifraude Real)
+            # Busca o último abastecimento ANTERIOR a este para o mesmo carro
+            ultimo_registro = db.query(models.Abastecimento).filter(
+                models.Abastecimento.id_veiculo == abastecimento.id_veiculo,
+                models.Abastecimento.id != abastecimento.id,
+                models.Abastecimento.quilometragem != None
+            ).order_by(models.Abastecimento.data_hora.desc()).first()
+
+            if ultimo_registro:
+                km_anterior = ultimo_registro.quilometragem
+                if km_lido <= km_anterior:
+                    alerta_ia = f"[ALERTA CRÍTICO] KM Regredido! Foto ({km_lido}) <= Último ({km_anterior})"
+            
+    # Salvar Alerta se houver
+    if alerta_ia:
+        print(f"❌ {alerta_ia}")
+        # Se já tiver algo escrito, adiciona, senão cria
+        msg_atual = abastecimento.justificativa_revisao or ""
+        abastecimento.justificativa_revisao = (msg_atual + " " + alerta_ia).strip()
+        db.add(abastecimento)
+
     nova_foto = models.FotoAbastecimento(id_abastecimento=id_abastecimento, tipo=tipo_foto, url_arquivo=nome_arquivo)
     db.add(nova_foto)
     db.commit()
     
-    return {"mensagem": "Sucesso", "url": f"/fotos/{nome_arquivo}"}
+    return {"mensagem": "Sucesso", "url": f"/fotos/{nome_arquivo}", "analise": alerta_ia}
