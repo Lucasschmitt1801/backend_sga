@@ -1,18 +1,15 @@
 import requests
 import base64
 import os
+import re # Biblioteca para expressões regulares (achar números)
 
 def ler_texto_imagem(caminho_arquivo):
     api_key = os.getenv("GOOGLE_API_KEY") 
-    
-    if not api_key:
-        print("⚠️ ERRO CRÍTICO: API Key não encontrada nas variáveis.")
-        return None
+    if not api_key: return None
 
     url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
 
     try:
-        print("📡 Preparando envio para o Google...")
         with open(caminho_arquivo, "rb") as image_file:
             content = base64.b64encode(image_file.read()).decode("utf-8")
 
@@ -24,32 +21,83 @@ def ler_texto_imagem(caminho_arquivo):
         }
 
         response = requests.post(url, json=payload)
-        print(f"📡 Google respondeu com Status: {response.status_code}")
-        
         dados = response.json()
-
-        # VERIFICAÇÃO DE ERROS DO GOOGLE (O Pulo do Gato)
-        if "error" in dados:
-            print(f"❌ ERRO DO GOOGLE: {dados['error']}")
-            return None
-            
+        
         if "responses" in dados and len(dados["responses"]) > 0:
             resp = dados["responses"][0]
-            
-            # Se houver erro dentro da resposta específica
-            if "error" in resp:
-                print(f"❌ ERRO NA ANÁLISE: {resp['error']}")
-                return None
-
             if "fullTextAnnotation" in resp:
                 texto = resp["fullTextAnnotation"]["text"]
                 return texto.upper().replace("-", "").replace(" ", "")
-            else:
-                print("⚠️ AVISO: O Google não encontrou NENHUM texto na imagem.")
-                return ""
-        
         return ""
-
     except Exception as e:
-        print(f"❌ ERRO DE CONEXÃO/CÓDIGO: {e}")
+        print(f"Erro OCR: {e}")
         return None
+
+# --- NOVA FUNÇÃO ESPECIALIZADA EM NÚMEROS ---
+def ler_km_imagem(caminho_arquivo):
+    texto_bruto = ler_texto_imagem(caminho_arquivo)
+    if not texto_bruto:
+        return None
+    
+    # Procura apenas dígitos no texto
+    # Ex: "Total 15400 km" -> "15400"
+    numeros = re.findall(r'\d+', texto_bruto)
+    
+    if numeros:
+        # Pega o maior número encontrado (geralmente o KM total é o maior número no painel)
+        # Convertendo para inteiro para comparar
+        maior_numero = max([int(n) for n in numeros], default=0)
+        return maior_numero
+    
+    return None
+```
+
+---
+
+### ⚙️ Passo 3: Atualizar a Lógica (`main.py`)
+
+Agora vamos conectar tudo. Quando chegar uma foto do tipo `PAINEL`, o sistema vai ler o número e comparar com o que foi registado.
+
+**Atualize o `backend_sga/main.py` (Apenas a rota `upload_foto` e os Modelos/Schemas):**
+
+*Nota: Para facilitar, vou te dar o bloco de código que você deve adicionar/alterar.*
+
+**1. Adicione o campo nos Schemas e Models (`models.py` e `schemas.py`):**
+* Em `models.py`: adicione `quilometragem = Column(Integer, nullable=True)` na classe `Abastecimento`.
+* Em `schemas.py`: adicione `quilometragem: int | None = None` na classe `AbastecimentoCreate`.
+
+**2. Atualize a rota `upload_foto` no `main.py`:**
+
+```python
+# ... (dentro da função upload_foto)
+
+    # 2. LÓGICA DE IA 🤖
+    if tipo_foto == "PLACA":
+        # ... (Lógica da Placa que já existia) ...
+        pass 
+
+    elif tipo_foto == "PAINEL":
+        print(f"🔍 IA Analisando Hodômetro: {nome_arquivo}")
+        km_lido = ocr_service.ler_km_imagem(caminho_completo)
+        
+        if km_lido:
+            print(f"🤖 IA Leu KM: {km_lido}")
+            km_registrado = abastecimento.quilometragem
+            
+            if km_registrado:
+                # Tolerância de erro ou divergência
+                if km_lido < km_registrado:
+                    print("❌ KM Inconsistente (Foto menor que registro)!")
+                    abastecimento.justificativa_revisao = f"[ALERTA IA] KM na foto ({km_lido}) é MENOR que o digitado ({km_registrado})"
+                    db.add(abastecimento)
+                elif km_lido > (km_registrado + 100): # Se for muito maior também é estranho
+                    abastecimento.justificativa_revisao = f"[ALERTA IA] Divergência grande de KM: Foto={km_lido} vs Input={km_registrado}"
+                    db.add(abastecimento)
+                else:
+                    print("✅ KM Validado!")
+            else:
+                # Se o usuário não digitou KM, salvamos o da IA como sugestão no log
+                abastecimento.justificativa_revisao = f"[IA] KM Detectado na foto: {km_lido}"
+                db.add(abastecimento)
+            
+            db.commit()

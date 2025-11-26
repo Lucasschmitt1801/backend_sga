@@ -106,7 +106,55 @@ def revisar_abastecimento(id_abastecimento: int, review: schemas.AbastecimentoRe
     db.commit()
     db.refresh(abastecimento)
     return abastecimento
+# ... (imports anteriores)
 
+# --- ROTA NOVA: IDENTIFICAR VEÍCULO POR FOTO (IA) ---
+@app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
+def identificar_veiculo(
+    arquivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    # 1. Salva a foto temporariamente
+    extensao = arquivo.filename.split(".")[-1]
+    nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
+    caminho_completo = f"uploads/{nome_arquivo}"
+
+    with open(caminho_completo, "wb") as buffer:
+        shutil.copyfileobj(arquivo.file, buffer)
+
+    # 2. Chama a IA para ler o texto
+    print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
+    texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
+    
+    # Remove o arquivo temporário para não encher o servidor
+    os.remove(caminho_completo)
+
+    if not texto_ia:
+        raise HTTPException(status_code=404, detail="Não foi possível ler a placa na imagem.")
+
+    print(f"🤖 Texto encontrado: {texto_ia}")
+
+    # 3. Procura no Banco de Dados
+    # Vamos limpar o texto da IA (remover espaços/hifens) para comparar
+    texto_limpo = texto_ia.replace("-", "").replace(" ", "").upper()
+
+    # Pega todos os veículos ativos
+    todos_veiculos = db.query(models.Veiculo).all()
+
+    veiculo_encontrado = None
+    for veiculo in todos_veiculos:
+        placa_limpa = veiculo.placa.replace("-", "").replace(" ", "").upper()
+        
+        # Se a placa do carro estiver DENTRO do texto que a IA leu
+        if placa_limpa in texto_limpo:
+            veiculo_encontrado = veiculo
+            break
+    
+    if veiculo_encontrado:
+        return veiculo_encontrado
+    else:
+        raise HTTPException(status_code=404, detail="Nenhum veículo cadastrado foi encontrado nesta foto.")
 # --- ROTA DE UPLOAD COM INTELIGÊNCIA ARTIFICIAL ---
 @app.post("/abastecimentos/{id_abastecimento}/fotos/")
 def upload_foto(
