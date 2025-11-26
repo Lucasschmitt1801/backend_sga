@@ -7,6 +7,7 @@ from jose import jwt, JWTError
 from database import get_db, engine
 import models, schemas, auth
 import shutil
+import storage_client
 import re
 import os
 import uuid
@@ -158,6 +159,7 @@ def revisar_abastecimento(id_abastecimento: int, review: schemas.AbastecimentoRe
     return abastecimento
 
 # --- ROTA DE UPLOAD COM LÓGICA ANTIFRAUDE HISTÓRICA ---
+# --- ROTA DE UPLOAD COM SUPABASE + IA ---
 @app.post("/abastecimentos/{id_abastecimento}/fotos/")
 def upload_foto(
     id_abastecimento: int,
@@ -169,55 +171,78 @@ def upload_foto(
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
     if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
 
+    # 1. Preparar arquivo temporário (Necessário para o OCR funcionar localmente)
     extensao = arquivo.filename.split(".")[-1]
     nome_arquivo = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
-    caminho_completo = f"uploads/{nome_arquivo}"
+    caminho_temp = f"uploads/{nome_arquivo}"
 
-    with open(caminho_completo, "wb") as buffer:
+    # Salva localmente primeiro (Buffer temporário)
+    with open(caminho_temp, "wb") as buffer:
         shutil.copyfileobj(arquivo.file, buffer)
 
-    # LÓGICA DE IA
+    # 2. LÓGICA DE IA (Roda no arquivo local)
     alerta_ia = ""
     
-    if tipo_foto == "PLACA":
-        texto_ia = ocr_service.ler_texto_imagem(caminho_completo)
-        if texto_ia:
-            veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
-            placa_real = veiculo.placa.upper().replace("-", "").replace(" ", "")
-            if placa_real not in texto_ia:
-                alerta_ia = f"[ALERTA IA] Placa lida '{texto_ia[:15]}...' difere de '{placa_real}'"
+    try:
+        if tipo_foto == "PLACA":
+            texto_ia = ocr_service.ler_texto_imagem(caminho_temp)
+            if texto_ia:
+                veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
+                placa_real = veiculo.placa.upper().replace("-", "").replace(" ", "")
+                if placa_real not in texto_ia:
+                    alerta_ia = f"[ALERTA IA] Placa lida '{texto_ia[:15]}...' difere de '{placa_real}'"
 
-    elif tipo_foto == "PAINEL":
-        km_lido = ocr_service.ler_km_imagem(caminho_completo)
-        if km_lido:
-            # 1. Comparar com o Input do Usuário
-            km_input = abastecimento.quilometragem
-            if km_input and km_lido < km_input:
-                 alerta_ia = f"[ALERTA IA] KM Foto ({km_lido}) < KM Digitado ({km_input})"
+        elif tipo_foto == "PAINEL":
+            km_lido = ocr_service.ler_km_imagem(caminho_temp)
+            if km_lido:
+                # Validação Input
+                km_input = abastecimento.quilometragem
+                if km_input and km_lido < km_input:
+                     alerta_ia = f"[ALERTA IA] KM Foto ({km_lido}) < KM Digitado ({km_input})"
+                
+                # Validação Histórica
+                ultimo_registro = db.query(models.Abastecimento).filter(
+                    models.Abastecimento.id_veiculo == abastecimento.id_veiculo,
+                    models.Abastecimento.id != abastecimento.id,
+                    models.Abastecimento.quilometragem != None
+                ).order_by(models.Abastecimento.data_hora.desc()).first()
+
+                if ultimo_registro:
+                    km_anterior = ultimo_registro.quilometragem
+                    if km_lido <= km_anterior:
+                        alerta_ia = f"[ALERTA CRÍTICO] KM Regredido! Foto ({km_lido}) <= Último ({km_anterior})"
+        
+        # Atualiza justificativa se houver alerta
+        if alerta_ia:
+            print(f"❌ {alerta_ia}")
+            msg_atual = abastecimento.justificativa_revisao or ""
+            abastecimento.justificativa_revisao = (msg_atual + " " + alerta_ia).strip()
+            db.add(abastecimento)
+
+        # 3. UPLOAD PARA SUPABASE (Persistência Real)
+        # Re-lê o arquivo do disco para enviar bytes
+        with open(caminho_temp, "rb") as f:
+            arquivo_bytes = f.read()
             
-            # 2. Comparar com HISTÓRICO (Antifraude Real)
-            # Busca o último abastecimento ANTERIOR a este para o mesmo carro
-            ultimo_registro = db.query(models.Abastecimento).filter(
-                models.Abastecimento.id_veiculo == abastecimento.id_veiculo,
-                models.Abastecimento.id != abastecimento.id,
-                models.Abastecimento.quilometragem != None
-            ).order_by(models.Abastecimento.data_hora.desc()).first()
+        url_publica = storage_client.upload_arquivo(arquivo_bytes, nome_arquivo, arquivo.content_type)
 
-            if ultimo_registro:
-                km_anterior = ultimo_registro.quilometragem
-                if km_lido <= km_anterior:
-                    alerta_ia = f"[ALERTA CRÍTICO] KM Regredido! Foto ({km_lido}) <= Último ({km_anterior})"
-            
-    # Salvar Alerta se houver
-    if alerta_ia:
-        print(f"❌ {alerta_ia}")
-        # Se já tiver algo escrito, adiciona, senão cria
-        msg_atual = abastecimento.justificativa_revisao or ""
-        abastecimento.justificativa_revisao = (msg_atual + " " + alerta_ia).strip()
-        db.add(abastecimento)
+        # Salva no banco a URL da nuvem, não o caminho local!
+        nova_foto = models.FotoAbastecimento(
+            id_abastecimento=id_abastecimento, 
+            tipo=tipo_foto, 
+            url_arquivo=url_publica # <--- Agora é um link HTTPS
+        )
+        db.add(nova_foto)
+        db.commit()
 
-    nova_foto = models.FotoAbastecimento(id_abastecimento=id_abastecimento, tipo=tipo_foto, url_arquivo=nome_arquivo)
-    db.add(nova_foto)
-    db.commit()
-    
-    return {"mensagem": "Sucesso", "url": f"/fotos/{nome_arquivo}", "analise": alerta_ia}
+        # 4. Limpeza (Deleta o temporário local)
+        if os.path.exists(caminho_temp):
+            os.remove(caminho_temp)
+        
+        return {"mensagem": "Sucesso", "url": url_publica, "analise": alerta_ia}
+
+    except Exception as e:
+        # Se der erro, tenta limpar o temp para não acumular lixo
+        if os.path.exists(caminho_temp):
+            os.remove(caminho_temp)
+        raise HTTPException(status_code=500, detail=f"Erro no processamento: {str(e)}")
