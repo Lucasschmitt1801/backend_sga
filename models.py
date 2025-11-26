@@ -28,6 +28,7 @@ class Veiculo(Base):
 
 class Abastecimento(Base):
     __tablename__ = "abastecimentos"
+    quilometragem = Column(Integer, nullable=True)
 
     id = Column(Integer, primary_key=True, index=True)
     id_usuario = Column(Integer, ForeignKey("usuarios.id"))

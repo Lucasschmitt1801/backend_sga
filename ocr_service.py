@@ -50,26 +50,6 @@ def ler_km_imagem(caminho_arquivo):
         return maior_numero
     
     return None
-```
-
----
-
-### ⚙️ Passo 3: Atualizar a Lógica (`main.py`)
-
-Agora vamos conectar tudo. Quando chegar uma foto do tipo `PAINEL`, o sistema vai ler o número e comparar com o que foi registado.
-
-**Atualize o `backend_sga/main.py` (Apenas a rota `upload_foto` e os Modelos/Schemas):**
-
-*Nota: Para facilitar, vou te dar o bloco de código que você deve adicionar/alterar.*
-
-**1. Adicione o campo nos Schemas e Models (`models.py` e `schemas.py`):**
-* Em `models.py`: adicione `quilometragem = Column(Integer, nullable=True)` na classe `Abastecimento`.
-* Em `schemas.py`: adicione `quilometragem: int | None = None` na classe `AbastecimentoCreate`.
-
-**2. Atualize a rota `upload_foto` no `main.py`:**
-
-```python
-# ... (dentro da função upload_foto)
 
     # 2. LÓGICA DE IA 🤖
     if tipo_foto == "PLACA":

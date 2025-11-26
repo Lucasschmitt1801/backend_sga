@@ -37,6 +37,7 @@ class FotoResponse(BaseModel):
 class AbastecimentoCreate(BaseModel):
     id_veiculo: int
     valor_total: float
+    quilometragem: int | None = None
     litros: float | None = None
     nome_posto: str | None = None
     gps_lat: float | None = None
