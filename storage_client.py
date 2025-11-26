@@ -1,5 +1,8 @@
 import os
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Pegando as credenciais das variáveis de ambiente
 url: str = os.environ.get("SUPABASE_URL")

@@ -5,13 +5,17 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from database import get_db, engine
+from dotenv import load_dotenv # Importante para ler o .env
 import models, schemas, auth
 import shutil
-import storage_client
+import storage_client # Seu cliente do Supabase
 import re
 import os
 import uuid
 import ocr_service 
+
+# Carrega variáveis de ambiente
+load_dotenv()
 
 # Cria tabelas
 models.Base.metadata.create_all(bind=engine)
@@ -28,7 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuração de Fotos
+# Configuração de Fotos (Ainda necessário para o temp, mas não para servir)
 os.makedirs("uploads", exist_ok=True)
 app.mount("/fotos", StaticFiles(directory="uploads"), name="fotos")
 
@@ -46,7 +50,7 @@ def get_usuario_atual(token: str = Depends(oauth2_scheme), db: Session = Depends
     if user is None: raise HTTPException(status_code=401, detail="Usuário não encontrado")
     return user
 
-# --- ROTAS ---
+# --- ROTAS DE AUTENTICAÇÃO E CRUD ---
 
 @app.post("/auth/login", response_model=schemas.TokenOutput)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -70,69 +74,6 @@ def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db))
 def listar_veiculos(db: Session = Depends(get_db)):
     return db.query(models.Veiculo).all()
 
-# IDENTIFICAR VEÍCULO (IA)
-# Função auxiliar para padronizar o texto (Remove traços e espaços)
-def limpar_placa(texto):
-    return texto.replace("-", "").replace(" ", "").upper()
-
-@app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
-def identificar_veiculo(
-    arquivo: UploadFile = File(...), 
-    db: Session = Depends(get_db), 
-    usuario_atual: models.Usuario = Depends(get_usuario_atual)
-):
-    # 1. Salvar arquivo temporariamente
-    extensao = arquivo.filename.split(".")[-1]
-    nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
-    caminho_completo = f"uploads/{nome_arquivo}"
-    
-    with open(caminho_completo, "wb") as buffer:
-        shutil.copyfileobj(arquivo.file, buffer)
-
-    print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
-    
-    # 2. Ler OCR
-    texto_ocr = ocr_service.ler_texto_imagem(caminho_completo)
-    
-    # Limpa temp
-    if os.path.exists(caminho_completo):
-        os.remove(caminho_completo) 
-
-    if not texto_ocr:
-        raise HTTPException(status_code=404, detail="Não foi possível ler nenhum texto na imagem.")
-
-    # 3. Lógica Inteligente (Regex)
-    # Procura padrões: 3 Letras + 1 Num + 1 Letra/Num + 2 Num
-    # Cobre: AAA-1234 (Antiga) e AAA1B23 (Mercosul)
-    padrao_placa = re.compile(r'[A-Z]{3}[0-9][0-9A-Z][0-9]{2}')
-    
-    texto_limpo = limpar_placa(texto_ocr)
-    match = padrao_placa.search(texto_limpo)
-    
-    # Se achou um padrão de placa, usa ele. Se não, usa o texto bruto limpo.
-    candidata = match.group(0) if match else texto_limpo
-    print(f"🎯 OCR Bruto: {texto_ocr} | Candidata filtrada: {candidata}")
-
-    # 4. Busca no Banco de Dados
-    
-    # Tenta busca EXATA primeiro (Muito mais rápido e preciso)
-    veiculo = db.query(models.Veiculo).filter(models.Veiculo.placa == candidata).first()
-    if veiculo:
-        return veiculo
-        
-    # Se não achar exato, tenta a busca "CONTÉM" (Fallback para leituras parciais)
-    # Ex: OCR leu "BRABC1234" (pegou o BR da placa), mas no banco é "ABC1234"
-    todos_veiculos = db.query(models.Veiculo).all()
-    for v in todos_veiculos:
-        placa_v = limpar_placa(v.placa)
-        # Verifica se a placa do banco está contida no texto lido
-        if placa_v in texto_limpo: 
-            return v
-    
-    raise HTTPException(status_code=404, detail=f"Veículo não identificado. Texto lido: {texto_limpo}")
-
-
-# REGISTRAR ABASTECIMENTO
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
 def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     if not db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first():
@@ -158,8 +99,88 @@ def revisar_abastecimento(id_abastecimento: int, review: schemas.AbastecimentoRe
     db.refresh(abastecimento)
     return abastecimento
 
-# --- ROTA DE UPLOAD COM LÓGICA ANTIFRAUDE HISTÓRICA ---
-# --- ROTA DE UPLOAD COM SUPABASE + IA ---
+# --- ROTAS DE INTELIGÊNCIA ARTIFICIAL (IA) ---
+
+# 1. IDENTIFICAR VEÍCULO PELA PLACA
+def limpar_placa(texto):
+    return texto.replace("-", "").replace(" ", "").upper()
+
+@app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
+def identificar_veiculo(
+    arquivo: UploadFile = File(...), 
+    db: Session = Depends(get_db), 
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    extensao = arquivo.filename.split(".")[-1]
+    nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
+    caminho_completo = f"uploads/{nome_arquivo}"
+    
+    with open(caminho_completo, "wb") as buffer:
+        shutil.copyfileobj(arquivo.file, buffer)
+
+    print(f"🔍 Buscando veículo na foto: {nome_arquivo}")
+    texto_ocr = ocr_service.ler_texto_imagem(caminho_completo)
+    
+    if os.path.exists(caminho_completo):
+        os.remove(caminho_completo) 
+
+    if not texto_ocr:
+        raise HTTPException(status_code=404, detail="Não foi possível ler nenhum texto na imagem.")
+
+    # Regex para Placa (Mercosul e Antiga)
+    padrao_placa = re.compile(r'[A-Z]{3}[0-9][0-9A-Z][0-9]{2}')
+    texto_limpo = limpar_placa(texto_ocr)
+    match = padrao_placa.search(texto_limpo)
+    
+    candidata = match.group(0) if match else texto_limpo
+    print(f"🎯 OCR Bruto: {texto_ocr} | Candidata filtrada: {candidata}")
+
+    # Busca Exata
+    veiculo = db.query(models.Veiculo).filter(models.Veiculo.placa == candidata).first()
+    if veiculo: return veiculo
+        
+    # Busca "Contém"
+    todos_veiculos = db.query(models.Veiculo).all()
+    for v in todos_veiculos:
+        placa_v = limpar_placa(v.placa)
+        if placa_v in texto_limpo: return v
+    
+    raise HTTPException(status_code=404, detail=f"Veículo não identificado. Texto lido: {texto_limpo}")
+
+# 2. ASSISTENTE DE PREENCHIMENTO DE KM (NOVA ROTA ✅)
+@app.post("/assistente/ler_km/")
+def assistente_ler_km(
+    arquivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    """
+    Recebe a foto do painel e retorna o número do KM para preencher o app.
+    Não salva no banco, apenas ajuda o usuário.
+    """
+    extensao = arquivo.filename.split(".")[-1]
+    nome_arquivo = f"temp_km_{uuid.uuid4().hex}.{extensao}"
+    caminho_temp = f"uploads/{nome_arquivo}"
+    
+    with open(caminho_temp, "wb") as buffer:
+        shutil.copyfileobj(arquivo.file, buffer)
+
+    print(f"👀 Assistente Lendo KM: {nome_arquivo}")
+
+    try:
+        # Chama a função inteligente (V2) do ocr_service
+        km_detectado = ocr_service.ler_km_imagem(caminho_temp)
+    finally:
+        if os.path.exists(caminho_temp):
+            os.remove(caminho_temp)
+
+    if km_detectado is None:
+        raise HTTPException(status_code=404, detail="Nenhum número válido encontrado.")
+
+    return {"km": km_detectado}
+
+
+# 3. UPLOAD DE EVIDÊNCIA (COM SUPABASE + VALIDAÇÃO)
 @app.post("/abastecimentos/{id_abastecimento}/fotos/")
 def upload_foto(
     id_abastecimento: int,
@@ -171,12 +192,11 @@ def upload_foto(
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
     if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
 
-    # 1. Preparar arquivo temporário (Necessário para o OCR funcionar localmente)
+    # 1. Preparar arquivo temporário
     extensao = arquivo.filename.split(".")[-1]
     nome_arquivo = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
     caminho_temp = f"uploads/{nome_arquivo}"
 
-    # Salva localmente primeiro (Buffer temporário)
     with open(caminho_temp, "wb") as buffer:
         shutil.copyfileobj(arquivo.file, buffer)
 
@@ -219,30 +239,27 @@ def upload_foto(
             abastecimento.justificativa_revisao = (msg_atual + " " + alerta_ia).strip()
             db.add(abastecimento)
 
-        # 3. UPLOAD PARA SUPABASE (Persistência Real)
-        # Re-lê o arquivo do disco para enviar bytes
+        # 3. UPLOAD PARA SUPABASE
         with open(caminho_temp, "rb") as f:
             arquivo_bytes = f.read()
             
         url_publica = storage_client.upload_arquivo(arquivo_bytes, nome_arquivo, arquivo.content_type)
 
-        # Salva no banco a URL da nuvem, não o caminho local!
+        # Salva no banco
         nova_foto = models.FotoAbastecimento(
             id_abastecimento=id_abastecimento, 
             tipo=tipo_foto, 
-            url_arquivo=url_publica # <--- Agora é um link HTTPS
+            url_arquivo=url_publica 
         )
         db.add(nova_foto)
         db.commit()
 
-        # 4. Limpeza (Deleta o temporário local)
         if os.path.exists(caminho_temp):
             os.remove(caminho_temp)
         
         return {"mensagem": "Sucesso", "url": url_publica, "analise": alerta_ia}
 
     except Exception as e:
-        # Se der erro, tenta limpar o temp para não acumular lixo
         if os.path.exists(caminho_temp):
             os.remove(caminho_temp)
         raise HTTPException(status_code=500, detail=f"Erro no processamento: {str(e)}")
