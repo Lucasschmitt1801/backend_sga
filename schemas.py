@@ -1,60 +1,82 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
+from typing import Optional, List
 from datetime import datetime
 
-# --- LOGIN ---
-class LoginInput(BaseModel):
-    email: EmailStr
-    senha: str
+# --- TOKENS ---
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 class TokenOutput(BaseModel):
     access_token: str
     token_type: str
     perfil: str
 
+class TokenData(BaseModel):
+    email: Optional[str] = None
+    role: Optional[str] = None
+
+# --- USUÁRIOS ---
+class UsuarioBase(BaseModel):
+    email: str
+
+class UsuarioCreate(UsuarioBase):
+    nome: str
+    senha: str
+    perfil: str = "EXECUTOR" # ADMIN ou EXECUTOR
+
+class UsuarioLogin(UsuarioBase):
+    senha: str
+
 # --- VEÍCULOS ---
-class VeiculoCreate(BaseModel):
+class VeiculoBase(BaseModel):
     placa: str
     modelo: str
-    chassi: str | None = None
-    ano_fabricacao: int | None = None
-    cor: str | None = None
-    status: str = "PATIO"
+    cor: Optional[str] = None
+    ano_fabricacao: Optional[int] = None
+    chassi: Optional[str] = None
 
-class VeiculoResponse(VeiculoCreate):
+class VeiculoCreate(VeiculoBase):
+    pass
+
+class VeiculoResponse(VeiculoBase):
     id: int
+    status: str
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 # --- FOTOS ---
 class FotoResponse(BaseModel):
     id: int
-    url_arquivo: str
     tipo: str
+    url_arquivo: str
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 # --- ABASTECIMENTOS ---
-class AbastecimentoCreate(BaseModel):
+class AbastecimentoBase(BaseModel):
     id_veiculo: int
     valor_total: float
-    quilometragem: int | None = None
-    litros: float | None = None
-    nome_posto: str | None = None
-    gps_lat: float | None = None
-    gps_long: float | None = None
+    litros: Optional[float] = None
+    nome_posto: Optional[str] = None
+    quilometragem: Optional[int] = None
+    gps_lat: Optional[float] = None
+    gps_long: Optional[float] = None
 
-# O que o Admin envia para Aprovar/Reprovar
+class AbastecimentoCreate(AbastecimentoBase):
+    pass
+
 class AbastecimentoReview(BaseModel):
-    status: str 
-    justificativa: str | None = None
+    status: str # APROVADO, REPROVADO
+    justificativa: Optional[str] = None
 
-class AbastecimentoResponse(AbastecimentoCreate):
+class AbastecimentoResponse(AbastecimentoBase):
     id: int
+    id_usuario: int
     data_hora: datetime
     status: str
-    id_usuario: int
-    justificativa_revisao: str | None = None
-    fotos: list[FotoResponse] = [] 
-
+    justificativa_revisao: Optional[str] = None
+    fotos: List[FotoResponse] = []
+    
     class Config:
-        from_attributes = True
+        orm_mode = True
