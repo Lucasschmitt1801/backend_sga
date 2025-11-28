@@ -234,3 +234,54 @@ def upload_foto(id_abastecimento: int, tipo_foto: str = Form(...), arquivo: Uplo
     except Exception as e:
         if os.path.exists(caminho_temp): os.remove(caminho_temp)
         raise HTTPException(status_code=500, detail=f"Erro no processamento: {str(e)}")
+    
+    # ... (Mantenha os imports e códigos anteriores)
+
+# 1. LISTAR USUÁRIOS
+@app.get("/usuarios/", response_model=list[schemas.UsuarioBase]) # Crie um schema UsuarioDisplay se quiser esconder a senha
+def listar_usuarios(db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    # Apenas Admin pode ver a lista completa
+    if usuario_atual.perfil != "ADMIN":
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+    return db.query(models.Usuario).all()
+
+# 2. EXCLUIR USUÁRIO
+@app.delete("/usuarios/{usuario_id}")
+def deletar_usuario(usuario_id: int, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN":
+        raise HTTPException(status_code=403, detail="Apenas admins podem excluir.")
+    
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    
+    db.delete(usuario)
+    db.commit()
+    return {"mensagem": "Usuário excluído com sucesso"}
+
+# 3. EDITAR USUÁRIO (Atualizar cargo/setor/perfil)
+@app.put("/usuarios/{usuario_id}")
+def atualizar_usuario(
+    usuario_id: int, 
+    dados_atualizados: schemas.UsuarioCreate, # Usando o mesmo schema por simplicidade
+    db: Session = Depends(get_db),
+    usuario_atual: models.Usuario = Depends(get_usuario_atual)
+):
+    if usuario_atual.perfil != "ADMIN":
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+        
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    
+    # Atualiza os campos
+    usuario.nome = dados_atualizados.nome
+    usuario.email = dados_atualizados.email
+    usuario.perfil = dados_atualizados.perfil
+    # Se quiser permitir mudar senha aqui, teria que fazer hash de novo
+    # usuario.cargo = dados_atualizados.cargo (Se tiver no banco)
+    # usuario.setor = dados_atualizados.setor (Se tiver no banco)
+    
+    db.commit()
+    db.refresh(usuario)
+    return {"mensagem": "Dados atualizados"}
