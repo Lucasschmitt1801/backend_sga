@@ -52,32 +52,46 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     token_acesso = auth.criar_token_acesso(data={"sub": usuario.email, "role": usuario.perfil})
     return {"access_token": token_acesso, "token_type": "bearer", "perfil": usuario.perfil}
 
-# --- VEÍCULOS (LÓGICA DE LIMPEZA E STATUS) ---
+# --- SETORES (NOVO) ---
+@app.post("/setores/", response_model=schemas.SetorResponse)
+def criar_setor(setor: schemas.SetorCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN": raise HTTPException(403, detail="Apenas Admin")
+    if db.query(models.Setor).filter(models.Setor.nome == setor.nome).first():
+        raise HTTPException(400, detail="Setor já existe")
+    
+    novo = models.Setor(nome=setor.nome)
+    db.add(novo)
+    db.commit()
+    db.refresh(novo)
+    return novo
+
+@app.get("/setores/", response_model=list[schemas.SetorResponse])
+def listar_setores(db: Session = Depends(get_db)):
+    return db.query(models.Setor).all()
+
+@app.delete("/setores/{id}")
+def deletar_setor(id: int, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN": raise HTTPException(403, detail="Apenas Admin")
+    s = db.query(models.Setor).filter(models.Setor.id == id).first()
+    if not s: raise HTTPException(404, detail="Não encontrado")
+    db.delete(s)
+    db.commit()
+    return {"mensagem": "Deletado"}
+
+# --- VEÍCULOS ---
 @app.get("/veiculos/", response_model=list[schemas.VeiculoResponse])
 def listar_veiculos(db: Session = Depends(get_db)):
-    # REGRA: Apagar carros vendidos há mais de 48h
     limite = datetime.utcnow() - timedelta(hours=48)
-    expirados = db.query(models.Veiculo).filter(
-        models.Veiculo.status == "VENDIDO",
-        models.Veiculo.data_venda < limite
-    ).all()
-    
-    if expirados:
-        for c in expirados:
-            db.delete(c)
-        db.commit()
-
+    expirados = db.query(models.Veiculo).filter(models.Veiculo.status == "VENDIDO", models.Veiculo.data_venda < limite).all()
+    for c in expirados: db.delete(c)
+    if expirados: db.commit()
     return db.query(models.Veiculo).all()
 
 @app.post("/veiculos/", response_model=schemas.VeiculoResponse)
 def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db)):
-    if db.query(models.Veiculo).filter(models.Veiculo.placa == veiculo.placa).first():
-        raise HTTPException(status_code=400, detail="Veículo já existe")
-    
+    if db.query(models.Veiculo).filter(models.Veiculo.placa == veiculo.placa).first(): raise HTTPException(400, detail="Veículo já existe")
     novo = models.Veiculo(**veiculo.dict())
-    if novo.status == "VENDIDO": 
-        novo.data_venda = datetime.utcnow()
-        
+    if novo.status == "VENDIDO": novo.data_venda = datetime.utcnow()
     db.add(novo)
     db.commit()
     db.refresh(novo)
@@ -86,7 +100,7 @@ def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db))
 @app.put("/veiculos/{veiculo_id}", response_model=schemas.VeiculoResponse)
 def atualizar_veiculo(veiculo_id: int, dados: schemas.VeiculoUpdate, db: Session = Depends(get_db)):
     veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == veiculo_id).first()
-    if not veiculo: raise HTTPException(status_code=404, detail="Não encontrado")
+    if not veiculo: raise HTTPException(404, detail="Não encontrado")
     
     if dados.modelo: veiculo.modelo = dados.modelo
     if dados.fabricante: veiculo.fabricante = dados.fabricante
@@ -96,10 +110,8 @@ def atualizar_veiculo(veiculo_id: int, dados: schemas.VeiculoUpdate, db: Session
     
     if dados.status:
         veiculo.status = dados.status
-        if dados.status == "VENDIDO":
-            veiculo.data_venda = datetime.utcnow() # Inicia contagem de 48h
-        else:
-            veiculo.data_venda = None # Cancela se voltar pro estoque
+        if dados.status == "VENDIDO": veiculo.data_venda = datetime.utcnow()
+        else: veiculo.data_venda = None
             
     db.commit()
     db.refresh(veiculo)
@@ -108,7 +120,7 @@ def atualizar_veiculo(veiculo_id: int, dados: schemas.VeiculoUpdate, db: Session
 @app.delete("/veiculos/{veiculo_id}")
 def deletar_veiculo(veiculo_id: int, db: Session = Depends(get_db)):
     veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == veiculo_id).first()
-    if not veiculo: raise HTTPException(status_code=404, detail="Não encontrado")
+    if not veiculo: raise HTTPException(404, detail="Não encontrado")
     db.delete(veiculo)
     db.commit()
     return {"mensagem": "Removido"}
@@ -132,17 +144,13 @@ def identificar_veiculo(arquivo: UploadFile = File(...), db: Session = Depends(g
     candidata = match.group(0) if match else limpar_placa(texto_ocr)
 
     veiculo = db.query(models.Veiculo).filter(models.Veiculo.placa == candidata).first()
-    
-    # BLOQUEIO DE VENDIDOS NA IA
     if veiculo: 
-        if veiculo.status == "VENDIDO":
-             raise HTTPException(status_code=400, detail="Veículo consta como VENDIDO.")
+        if veiculo.status == "VENDIDO": raise HTTPException(400, detail="Veículo consta como VENDIDO.")
         return veiculo
     
     for v in db.query(models.Veiculo).all():
         if limpar_placa(v.placa) in limpar_placa(texto_ocr): 
-             if v.status == "VENDIDO":
-                 raise HTTPException(status_code=400, detail="Veículo consta como VENDIDO.")
+             if v.status == "VENDIDO": raise HTTPException(400, detail="Veículo consta como VENDIDO.")
              return v
     
     raise HTTPException(status_code=404, detail="Veículo não encontrado")
@@ -159,16 +167,12 @@ def assistente_ler_km(arquivo: UploadFile = File(...), db: Session = Depends(get
     if km is None: raise HTTPException(404, detail="KM não encontrado")
     return {"km": km}
 
-# --- ABASTECIMENTOS (BLOQUEIO DE VENDIDOS) ---
+# --- ABASTECIMENTOS ---
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
 def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first()
-    
     if not veiculo: raise HTTPException(404, detail="Veículo não encontrado")
-    
-    # BLOQUEIO: Se status for VENDIDO, rejeita o abastecimento manual
-    if veiculo.status == "VENDIDO":
-        raise HTTPException(status_code=400, detail="BLOQUEADO: Veículo VENDIDO não pode abastecer.")
+    if veiculo.status == "VENDIDO": raise HTTPException(400, detail="BLOQUEADO: Veículo VENDIDO.")
     
     novo = models.Abastecimento(id_usuario=usuario_atual.id, **dados.dict(), status="PENDENTE_VALIDACAO")
     db.add(novo)

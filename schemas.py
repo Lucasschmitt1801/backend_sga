@@ -2,6 +2,18 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
+# --- SETORES (NOVO) ---
+class SetorBase(BaseModel):
+    nome: str
+
+class SetorCreate(SetorBase):
+    pass
+
+class SetorResponse(SetorBase):
+    id: int
+    class Config:
+        orm_mode = True
+
 # --- TOKENS ---
 class TokenOutput(BaseModel):
     access_token: str
@@ -17,7 +29,7 @@ class UsuarioCreate(BaseModel):
     cargo: Optional[str] = None
     setor: Optional[str] = None
 
-# --- VEÍCULOS (ATUALIZADO) ---
+# --- VEÍCULOS ---
 class VeiculoBase(BaseModel):
     placa: str
     modelo: str
