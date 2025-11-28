@@ -3,58 +3,49 @@ from typing import Optional, List
 from datetime import datetime
 
 # --- TOKENS ---
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
 class TokenOutput(BaseModel):
     access_token: str
     token_type: str
     perfil: str
 
-class TokenData(BaseModel):
-    email: Optional[str] = None
-    role: Optional[str] = None
-
 # --- USUÁRIOS ---
-class UsuarioBase(BaseModel):
-    email: str
-
-class UsuarioCreate(UsuarioBase):
+class UsuarioCreate(BaseModel):
     nome: str
+    email: str
     senha: str
-    perfil: str = "EXECUTOR" # ADMIN ou EXECUTOR
+    perfil: str = "EXECUTOR"
+    cargo: Optional[str] = None
+    setor: Optional[str] = None
 
-class UsuarioLogin(UsuarioBase):
-    senha: str
-
-# --- VEÍCULOS ---
+# --- VEÍCULOS (ATUALIZADO) ---
 class VeiculoBase(BaseModel):
     placa: str
     modelo: str
+    fabricante: Optional[str] = None
     cor: Optional[str] = None
     ano_fabricacao: Optional[int] = None
     chassi: Optional[str] = None
+    id_setor: Optional[int] = None
+    status: str = "ESTOQUE"
 
 class VeiculoCreate(VeiculoBase):
     pass
 
+class VeiculoUpdate(BaseModel):
+    modelo: Optional[str] = None
+    fabricante: Optional[str] = None
+    cor: Optional[str] = None
+    status: Optional[str] = None
+    id_setor: Optional[int] = None
+    chassi: Optional[str] = None
+
 class VeiculoResponse(VeiculoBase):
     id: int
-    status: str
-    class Config:
-        orm_mode = True
-
-# --- FOTOS ---
-class FotoResponse(BaseModel):
-    id: int
-    tipo: str
-    url_arquivo: str
     class Config:
         orm_mode = True
 
 # --- ABASTECIMENTOS ---
-class AbastecimentoBase(BaseModel):
+class AbastecimentoCreate(BaseModel):
     id_veiculo: int
     valor_total: float
     litros: Optional[float] = None
@@ -63,20 +54,23 @@ class AbastecimentoBase(BaseModel):
     gps_lat: Optional[float] = None
     gps_long: Optional[float] = None
 
-class AbastecimentoCreate(AbastecimentoBase):
-    pass
-
 class AbastecimentoReview(BaseModel):
-    status: str # APROVADO, REPROVADO
+    status: str
     justificativa: Optional[str] = None
 
-class AbastecimentoResponse(AbastecimentoBase):
+class FotoResponse(BaseModel):
+    id: int
+    tipo: str
+    url_arquivo: str
+    class Config:
+        orm_mode = True
+
+class AbastecimentoResponse(AbastecimentoCreate):
     id: int
     id_usuario: int
     data_hora: datetime
     status: str
     justificativa_revisao: Optional[str] = None
     fotos: List[FotoResponse] = []
-    
     class Config:
         orm_mode = True

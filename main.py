@@ -12,17 +12,14 @@ import storage_client
 import re
 import os
 import uuid
-import ocr_service 
+import ocr_service
+from datetime import datetime, timedelta
 
-# Carrega ambiente
 load_dotenv()
-
-# Cria tabelas
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="SGA - Sistema de Gestão de Abastecimento")
 
-# Configuração CORS 
 origins = ["*"] 
 app.add_middleware(
     CORSMiddleware,
@@ -32,11 +29,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuração de Fotos
 os.makedirs("uploads", exist_ok=True)
 app.mount("/fotos", StaticFiles(directory="uploads"), name="fotos")
-
-# Segurança
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 def get_usuario_atual(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -45,13 +39,11 @@ def get_usuario_atual(token: str = Depends(oauth2_scheme), db: Session = Depends
         email: str = payload.get("sub")
         if email is None: raise HTTPException(status_code=401, detail="Token inválido")
     except JWTError: raise HTTPException(status_code=401, detail="Token inválido")
-    
     user = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if user is None: raise HTTPException(status_code=401, detail="Usuário não encontrado")
     return user
 
-# --- ROTAS ---
-
+# --- AUTH ---
 @app.post("/auth/login", response_model=schemas.TokenOutput)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     usuario = db.query(models.Usuario).filter(models.Usuario.email == form_data.username).first()
@@ -60,102 +52,123 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     token_acesso = auth.criar_token_acesso(data={"sub": usuario.email, "role": usuario.perfil})
     return {"access_token": token_acesso, "token_type": "bearer", "perfil": usuario.perfil}
 
-# NOVA ROTA: CRIAR USUÁRIO (Apenas Admin)
-@app.post("/usuarios/", response_model=schemas.TokenOutput)
-def criar_usuario(
-    novo_usuario: schemas.UsuarioCreate, 
-    db: Session = Depends(get_db),
-    usuario_atual: models.Usuario = Depends(get_usuario_atual)
-):
-    if usuario_atual.perfil != "ADMIN":
-        raise HTTPException(status_code=403, detail="Acesso negado. Apenas administradores.")
+# --- VEÍCULOS (LÓGICA DE LIMPEZA E STATUS) ---
+@app.get("/veiculos/", response_model=list[schemas.VeiculoResponse])
+def listar_veiculos(db: Session = Depends(get_db)):
+    # REGRA: Apagar carros vendidos há mais de 48h
+    limite = datetime.utcnow() - timedelta(hours=48)
+    expirados = db.query(models.Veiculo).filter(
+        models.Veiculo.status == "VENDIDO",
+        models.Veiculo.data_venda < limite
+    ).all()
+    
+    if expirados:
+        for c in expirados:
+            db.delete(c)
+        db.commit()
 
-    if db.query(models.Usuario).filter(models.Usuario.email == novo_usuario.email).first():
-        raise HTTPException(status_code=400, detail="Email já cadastrado.")
-
-    senha_hash = auth.get_password_hash(novo_usuario.senha)
-    
-    usuario_db = models.Usuario(
-        nome=novo_usuario.nome,
-        email=novo_usuario.email,
-        senha_hash=senha_hash,
-        perfil=novo_usuario.perfil
-    )
-    
-    db.add(usuario_db)
-    db.commit()
-    db.refresh(usuario_db)
-    
-    # Retorna um token fake ou dados básicos só pra confirmar
-    return {"access_token": "criado_com_sucesso", "token_type": "bearer", "perfil": usuario_db.perfil}
+    return db.query(models.Veiculo).all()
 
 @app.post("/veiculos/", response_model=schemas.VeiculoResponse)
 def criar_veiculo(veiculo: schemas.VeiculoCreate, db: Session = Depends(get_db)):
     if db.query(models.Veiculo).filter(models.Veiculo.placa == veiculo.placa).first():
         raise HTTPException(status_code=400, detail="Veículo já existe")
+    
     novo = models.Veiculo(**veiculo.dict())
+    if novo.status == "VENDIDO": 
+        novo.data_venda = datetime.utcnow()
+        
     db.add(novo)
     db.commit()
     db.refresh(novo)
     return novo
 
-@app.get("/veiculos/", response_model=list[schemas.VeiculoResponse])
-def listar_veiculos(db: Session = Depends(get_db)):
-    return db.query(models.Veiculo).all()
+@app.put("/veiculos/{veiculo_id}", response_model=schemas.VeiculoResponse)
+def atualizar_veiculo(veiculo_id: int, dados: schemas.VeiculoUpdate, db: Session = Depends(get_db)):
+    veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == veiculo_id).first()
+    if not veiculo: raise HTTPException(status_code=404, detail="Não encontrado")
+    
+    if dados.modelo: veiculo.modelo = dados.modelo
+    if dados.fabricante: veiculo.fabricante = dados.fabricante
+    if dados.cor: veiculo.cor = dados.cor
+    if dados.chassi: veiculo.chassi = dados.chassi
+    if dados.id_setor: veiculo.id_setor = dados.id_setor
+    
+    if dados.status:
+        veiculo.status = dados.status
+        if dados.status == "VENDIDO":
+            veiculo.data_venda = datetime.utcnow() # Inicia contagem de 48h
+        else:
+            veiculo.data_venda = None # Cancela se voltar pro estoque
+            
+    db.commit()
+    db.refresh(veiculo)
+    return veiculo
 
-# --- OCR E IA ---
-def limpar_placa(texto):
-    return texto.replace("-", "").replace(" ", "").upper()
+@app.delete("/veiculos/{veiculo_id}")
+def deletar_veiculo(veiculo_id: int, db: Session = Depends(get_db)):
+    veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == veiculo_id).first()
+    if not veiculo: raise HTTPException(status_code=404, detail="Não encontrado")
+    db.delete(veiculo)
+    db.commit()
+    return {"mensagem": "Removido"}
+
+# --- IA ---
+def limpar_placa(texto): return texto.replace("-", "").replace(" ", "").upper()
 
 @app.post("/identificar_veiculo/", response_model=schemas.VeiculoResponse)
 def identificar_veiculo(arquivo: UploadFile = File(...), db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     extensao = arquivo.filename.split(".")[-1]
     nome_arquivo = f"temp_search_{uuid.uuid4().hex}.{extensao}"
-    caminho_completo = f"uploads/{nome_arquivo}"
-    
-    with open(caminho_completo, "wb") as buffer: shutil.copyfileobj(arquivo.file, buffer)
+    caminho = f"uploads/{nome_arquivo}"
+    with open(caminho, "wb") as b: shutil.copyfileobj(arquivo.file, b)
 
-    texto_ocr = ocr_service.ler_texto_imagem(caminho_completo)
-    if os.path.exists(caminho_completo): os.remove(caminho_completo) 
+    texto_ocr = ocr_service.ler_texto_imagem(caminho)
+    if os.path.exists(caminho): os.remove(caminho) 
+    if not texto_ocr: raise HTTPException(status_code=404, detail="Placa ilegível")
 
-    if not texto_ocr: raise HTTPException(status_code=404, detail="Não foi possível ler a placa.")
-
-    padrao_placa = re.compile(r'[A-Z]{3}[0-9][0-9A-Z][0-9]{2}')
-    texto_limpo = limpar_placa(texto_ocr)
-    match = padrao_placa.search(texto_limpo)
-    candidata = match.group(0) if match else texto_limpo
+    padrao = re.compile(r'[A-Z]{3}[0-9][0-9A-Z][0-9]{2}')
+    match = padrao.search(limpar_placa(texto_ocr))
+    candidata = match.group(0) if match else limpar_placa(texto_ocr)
 
     veiculo = db.query(models.Veiculo).filter(models.Veiculo.placa == candidata).first()
-    if veiculo: return veiculo
-        
-    todos_veiculos = db.query(models.Veiculo).all()
-    for v in todos_veiculos:
-        if limpar_placa(v.placa) in texto_limpo: return v
     
-    raise HTTPException(status_code=404, detail=f"Veículo não identificado.")
+    # BLOQUEIO DE VENDIDOS NA IA
+    if veiculo: 
+        if veiculo.status == "VENDIDO":
+             raise HTTPException(status_code=400, detail="Veículo consta como VENDIDO.")
+        return veiculo
+    
+    for v in db.query(models.Veiculo).all():
+        if limpar_placa(v.placa) in limpar_placa(texto_ocr): 
+             if v.status == "VENDIDO":
+                 raise HTTPException(status_code=400, detail="Veículo consta como VENDIDO.")
+             return v
+    
+    raise HTTPException(status_code=404, detail="Veículo não encontrado")
 
 @app.post("/assistente/ler_km/")
 def assistente_ler_km(arquivo: UploadFile = File(...), db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     extensao = arquivo.filename.split(".")[-1]
-    nome_arquivo = f"temp_km_{uuid.uuid4().hex}.{extensao}"
-    caminho_temp = f"uploads/{nome_arquivo}"
-    
-    with open(caminho_temp, "wb") as buffer: shutil.copyfileobj(arquivo.file, buffer)
+    nome = f"temp_km_{uuid.uuid4().hex}.{extensao}"
+    caminho = f"uploads/{nome}"
+    with open(caminho, "wb") as b: shutil.copyfileobj(arquivo.file, b)
+    try: km = ocr_service.ler_km_imagem(caminho)
+    finally: 
+        if os.path.exists(caminho): os.remove(caminho)
+    if km is None: raise HTTPException(404, detail="KM não encontrado")
+    return {"km": km}
 
-    try:
-        km_detectado = ocr_service.ler_km_imagem(caminho_temp)
-    finally:
-        if os.path.exists(caminho_temp): os.remove(caminho_temp)
-
-    if km_detectado is None: raise HTTPException(status_code=404, detail="Nenhum número válido encontrado.")
-    return {"km": km_detectado}
-
-# --- ABASTECIMENTOS ---
-
+# --- ABASTECIMENTOS (BLOQUEIO DE VENDIDOS) ---
 @app.post("/abastecimentos/", response_model=schemas.AbastecimentoResponse)
 def registrar_abastecimento(dados: schemas.AbastecimentoCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
-    if not db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first():
-        raise HTTPException(status_code=404, detail="Veículo não encontrado")
+    veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == dados.id_veiculo).first()
+    
+    if not veiculo: raise HTTPException(404, detail="Veículo não encontrado")
+    
+    # BLOQUEIO: Se status for VENDIDO, rejeita o abastecimento manual
+    if veiculo.status == "VENDIDO":
+        raise HTTPException(status_code=400, detail="BLOQUEADO: Veículo VENDIDO não pode abastecer.")
     
     novo = models.Abastecimento(id_usuario=usuario_atual.id, **dados.dict(), status="PENDENTE_VALIDACAO")
     db.add(novo)
@@ -168,120 +181,72 @@ def listar_abastecimentos(db: Session = Depends(get_db)):
     return db.query(models.Abastecimento).order_by(models.Abastecimento.data_hora.desc()).all()
 
 @app.patch("/abastecimentos/{id_abastecimento}/revisar", response_model=schemas.AbastecimentoResponse)
-def revisar_abastecimento(id_abastecimento: int, review: schemas.AbastecimentoReview, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+def revisar(id_abastecimento: int, review: schemas.AbastecimentoReview, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
-    if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
+    if not abastecimento: raise HTTPException(404, detail="Não encontrado")
     abastecimento.status = review.status
     if review.justificativa: abastecimento.justificativa_revisao = review.justificativa
     db.commit()
-    db.refresh(abastecimento)
     return abastecimento
 
 @app.post("/abastecimentos/{id_abastecimento}/fotos/")
 def upload_foto(id_abastecimento: int, tipo_foto: str = Form(...), arquivo: UploadFile = File(...), db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
     abastecimento = db.query(models.Abastecimento).filter(models.Abastecimento.id == id_abastecimento).first()
-    if not abastecimento: raise HTTPException(status_code=404, detail="Abastecimento não encontrado")
+    if not abastecimento: raise HTTPException(404, detail="Não encontrado")
 
     extensao = arquivo.filename.split(".")[-1]
-    nome_arquivo = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
-    caminho_temp = f"uploads/{nome_arquivo}"
+    nome = f"{id_abastecimento}_{tipo_foto}_{uuid.uuid4().hex}.{extensao}"
+    caminho = f"uploads/{nome}"
+    with open(caminho, "wb") as b: shutil.copyfileobj(arquivo.file, b)
 
-    with open(caminho_temp, "wb") as buffer: shutil.copyfileobj(arquivo.file, buffer)
-
-    alerta_ia = ""
+    alerta = ""
     try:
         if tipo_foto == "PLACA":
-            texto_ia = ocr_service.ler_texto_imagem(caminho_temp)
-            if texto_ia:
-                veiculo = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
-                placa_real = veiculo.placa.upper().replace("-", "").replace(" ", "")
-                if placa_real not in texto_ia:
-                    alerta_ia = f"[ALERTA IA] Placa lida '{texto_ia[:15]}...' difere de '{placa_real}'"
-
+            txt = ocr_service.ler_texto_imagem(caminho)
+            v = db.query(models.Veiculo).filter(models.Veiculo.id == abastecimento.id_veiculo).first()
+            if txt and v.placa.replace("-","") not in txt.replace("-",""): alerta = "Alerta: Placa divergente"
         elif tipo_foto == "PAINEL":
-            km_lido = ocr_service.ler_km_imagem(caminho_temp)
-            if km_lido:
-                km_input = abastecimento.quilometragem
-                if km_input and km_lido < km_input:
-                     alerta_ia = f"[ALERTA IA] KM Foto ({km_lido}) < KM Digitado ({km_input})"
-                
-                ultimo_registro = db.query(models.Abastecimento).filter(
-                    models.Abastecimento.id_veiculo == abastecimento.id_veiculo,
-                    models.Abastecimento.id != abastecimento.id,
-                    models.Abastecimento.quilometragem != None
-                ).order_by(models.Abastecimento.data_hora.desc()).first()
-
-                if ultimo_registro:
-                    km_anterior = ultimo_registro.quilometragem
-                    if km_lido <= km_anterior:
-                        alerta_ia = f"[ALERTA CRÍTICO] KM Regredido! Foto ({km_lido}) <= Último ({km_anterior})"
+            km = ocr_service.ler_km_imagem(caminho)
+            if km and abastecimento.quilometragem and km < abastecimento.quilometragem: alerta = f"Alerta: KM Foto ({km}) < Input ({abastecimento.quilometragem})"
         
-        if alerta_ia:
-            msg_atual = abastecimento.justificativa_revisao or ""
-            abastecimento.justificativa_revisao = (msg_atual + " " + alerta_ia).strip()
+        if alerta:
+            abastecimento.justificativa_revisao = (abastecimento.justificativa_revisao or "") + " " + alerta
             db.add(abastecimento)
 
-        with open(caminho_temp, "rb") as f: arquivo_bytes = f.read()
-        url_publica = storage_client.upload_arquivo(arquivo_bytes, nome_arquivo, arquivo.content_type)
-
-        nova_foto = models.FotoAbastecimento(id_abastecimento=id_abastecimento, tipo=tipo_foto, url_arquivo=url_publica)
-        db.add(nova_foto)
-        db.commit()
-
-        if os.path.exists(caminho_temp): os.remove(caminho_temp)
-        return {"mensagem": "Sucesso", "url": url_publica, "analise": alerta_ia}
-
-    except Exception as e:
-        if os.path.exists(caminho_temp): os.remove(caminho_temp)
-        raise HTTPException(status_code=500, detail=f"Erro no processamento: {str(e)}")
-    
-    # ... (Mantenha os imports e códigos anteriores)
-
-# 1. LISTAR USUÁRIOS
-@app.get("/usuarios/", response_model=list[schemas.UsuarioBase]) # Crie um schema UsuarioDisplay se quiser esconder a senha
-def listar_usuarios(db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
-    # Apenas Admin pode ver a lista completa
-    if usuario_atual.perfil != "ADMIN":
-        raise HTTPException(status_code=403, detail="Acesso negado.")
-    return db.query(models.Usuario).all()
-
-# 2. EXCLUIR USUÁRIO
-@app.delete("/usuarios/{usuario_id}")
-def deletar_usuario(usuario_id: int, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
-    if usuario_atual.perfil != "ADMIN":
-        raise HTTPException(status_code=403, detail="Apenas admins podem excluir.")
-    
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    
-    db.delete(usuario)
-    db.commit()
-    return {"mensagem": "Usuário excluído com sucesso"}
-
-# 3. EDITAR USUÁRIO (Atualizar cargo/setor/perfil)
-@app.put("/usuarios/{usuario_id}")
-def atualizar_usuario(
-    usuario_id: int, 
-    dados_atualizados: schemas.UsuarioCreate, # Usando o mesmo schema por simplicidade
-    db: Session = Depends(get_db),
-    usuario_atual: models.Usuario = Depends(get_usuario_atual)
-):
-    if usuario_atual.perfil != "ADMIN":
-        raise HTTPException(status_code=403, detail="Acesso negado.")
+        with open(caminho, "rb") as f: bytes_arq = f.read()
+        url = storage_client.upload_arquivo(bytes_arq, nome, arquivo.content_type)
         
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        nova = models.FotoAbastecimento(id_abastecimento=id_abastecimento, tipo=tipo_foto, url_arquivo=url)
+        db.add(nova)
+        db.commit()
+        
+        if os.path.exists(caminho): os.remove(caminho)
+        return {"mensagem": "Sucesso", "url": url, "analise": alerta}
+    except Exception as e:
+        if os.path.exists(caminho): os.remove(caminho)
+        raise HTTPException(500, detail=str(e))
+
+# --- USUÁRIOS ---
+@app.post("/usuarios/", response_model=schemas.TokenOutput)
+def criar_usuario(novo: schemas.UsuarioCreate, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN": raise HTTPException(403, detail="Acesso negado")
+    if db.query(models.Usuario).filter(models.Usuario.email == novo.email).first(): raise HTTPException(400, detail="Email existe")
     
-    # Atualiza os campos
-    usuario.nome = dados_atualizados.nome
-    usuario.email = dados_atualizados.email
-    usuario.perfil = dados_atualizados.perfil
-    # Se quiser permitir mudar senha aqui, teria que fazer hash de novo
-    # usuario.cargo = dados_atualizados.cargo (Se tiver no banco)
-    # usuario.setor = dados_atualizados.setor (Se tiver no banco)
-    
+    user = models.Usuario(nome=novo.nome, email=novo.email, senha_hash=auth.get_password_hash(novo.senha), perfil=novo.perfil)
+    db.add(user)
     db.commit()
-    db.refresh(usuario)
-    return {"mensagem": "Dados atualizados"}
+    return {"access_token": "", "token_type": "", "perfil": user.perfil}
+
+@app.get("/usuarios/")
+def listar_usuarios(db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN": raise HTTPException(403, detail="Acesso negado")
+    return [{"id": u.id, "nome": u.nome, "email": u.email, "perfil": u.perfil} for u in db.query(models.Usuario).all()]
+
+@app.delete("/usuarios/{uid}")
+def deletar_usuario(uid: int, db: Session = Depends(get_db), usuario_atual: models.Usuario = Depends(get_usuario_atual)):
+    if usuario_atual.perfil != "ADMIN": raise HTTPException(403, detail="Acesso negado")
+    u = db.query(models.Usuario).filter(models.Usuario.id == uid).first()
+    if u: 
+        db.delete(u)
+        db.commit()
+    return {"msg": "Deletado"}
